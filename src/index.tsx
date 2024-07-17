@@ -1,5 +1,6 @@
 import { html } from "@elysiajs/html";
 import { Elysia, Static, t } from "elysia";
+import { ElysiaWS } from "elysia/dist/ws";
 
 const MINES_COUNT = 8;
 const BOARD_LENGTH = 8;
@@ -115,16 +116,19 @@ const Page = () => <>
       <title>Minesweeper :)</title>
       <link rel="stylesheet" href="/public/css/output.css" />
       <script src="https://unpkg.com/htmx.org@2.0.1" />
+      <script src="https://unpkg.com/htmx.org@1.9.12/dist/ext/ws.js" />
     </head>
     <body class="h-screen flex flex-col gap-4 items-center justify-center bg-black text-white">
-      <Message />
-      <Board />
-      <button
-        hx-post="/restart"
-        hx-swap="none"
-      >
-        Restart
-      </button>
+      <div class="contents" hx-ext="ws" ws-connect="/ws">
+        <Message />
+        <Board />
+        <button
+          hx-post="/restart"
+          hx-swap="none"
+        >
+          Restart
+        </button>
+      </div>
     </body>
   </html>
 </>;
@@ -230,7 +234,7 @@ const exposeMore = ({ x, y }: Coords): Array<Parameters<typeof Space>[0]> => {
   return !next.length ? [props] : [props, ...next.flatMap(([x, y]) => exposeMore({ x, y }))];
 };
 
-const flag = ({ x, y }: Coords) => {
+const flag = async ({ x, y }: Coords) => {
   board[x][y].flag = !board[x][y].flag;
 
   // Game ends when all mines have flags, and there are no false flags
@@ -243,7 +247,7 @@ const flag = ({ x, y }: Coords) => {
   </>;
 }
 
-const restart = () => {
+const restart = async () => {
   start();
   return <>
     <Message swap />
@@ -251,22 +255,38 @@ const restart = () => {
   </>;
 }
 
+const sockets: Map<string, ((data: unknown) => void)> = new Map();
+
+// let publish: undefined | ((topic: string, data: string | ArrayBufferView | ArrayBuffer | SharedArrayBuffer, compress?: boolean | undefined) => number);
 const app = new Elysia()
   .use(html())
   .get("/public/css/output.css", Bun.file("./src/output.css"))
   .get("/", () => Page())
 
+  .ws("/ws", {
+    open: (ws) => {
+      sockets.set(ws.id, ws.send);
+    },
+    close: (ws) => {
+      sockets.delete(ws.id);
+    }
+  })
+
   .guard({
     body: coordsBody
   }, app => app
-    .post("/expose", ({ body }) => expose(body))
-    .post("/flag", ({ body }) => flag(body))
+    .post("/expose", ({ body }) => {
+      expose(body)
+        .then(m => Array.from(sockets).map(([_, send]) => send(m)))
+    })
+    .post("/flag", ({ body }) => { flag(body).then(m => Array.from(sockets).map(([_, send]) => send(m))) })
   )
 
-  .post("/restart", () => restart())
+  .post("/restart", () => { restart().then(m => Array.from(sockets).map(([_, send]) => send(m))) })
 
   .get("/*", () => Response.redirect("/"))
   .listen(3001, ({ hostname, port }) => {
+
     console.log(
       `HTMX-Minesweeper is running at ${hostname}:${port}`
     );
